@@ -1,0 +1,7 @@
+Lemon Scented Lawn scene assets go here.
+
+Suggested contents:
+- `models/`
+- `textures/`
+- `audio/`
+- `timeline/`

@@ -1,0 +1,4 @@
+Project resources are organized by purpose.
+
+- `Environment/` contains shared lighting and sky assets.
+- `Scenes/` contains per-destination content for the time-travel experience.

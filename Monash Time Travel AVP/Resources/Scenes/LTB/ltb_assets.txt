@@ -1,0 +1,7 @@
+LTB scene assets go here.
+
+Suggested contents:
+- `models/`
+- `textures/`
+- `audio/`
+- `timeline/`
