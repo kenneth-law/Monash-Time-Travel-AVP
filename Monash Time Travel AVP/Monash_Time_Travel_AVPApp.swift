@@ -15,8 +15,8 @@ struct Monash_Time_Travel_AVPApp: App {
         }
 
         #if os(visionOS)
-        ImmersiveSpace(id: "game-space", for: MenuScene.self) { selectedScene in
-            ImmersiveGameView(selectedScene: selectedScene.wrappedValue ?? .hongKong)
+        ImmersiveSpace(id: "game-space", for: TimeTravelSelection.self) { selection in
+            ImmersiveGameView(selection: selection.wrappedValue ?? TimeTravelSelection())
         }
         .immersionStyle(selection: .constant(.full), in: .full)
         #endif

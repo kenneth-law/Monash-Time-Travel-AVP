@@ -17,59 +17,6 @@ enum GameState {
     case menu
     case playing
 }
-
-enum MenuScene: String, CaseIterable, Codable {
-    case hongKong
-
-    var title: String {
-        switch self {
-        case .hongKong:
-            return "Hong Kong"
-        }
-    }
-
-    var assetName: String {
-        switch self {
-        case .hongKong:
-            return "Full_Gameready_City_Buildings_IV_HongKong"
-        }
-    }
-
-    var assetID: String {
-        switch self {
-        case .hongKong:
-            return "scene.hong-kong"
-        }
-    }
-
-    var position: SIMD3<Float> {
-        switch self {
-        case .hongKong:
-            return [0, 0, -12]
-        }
-    }
-
-    var immersivePosition: SIMD3<Float> {
-        switch self {
-        case .hongKong:
-            return [0, -1.75, 0]
-        }
-    }
-
-    var scale: Float {
-        switch self {
-        case .hongKong:
-            return 0.12
-        }
-    }
-
-    func next() -> MenuScene {
-        let scenes = Self.allCases
-        guard let currentIndex = scenes.firstIndex(of: self) else { return self }
-        let nextIndex = scenes.index(after: currentIndex)
-        return nextIndex == scenes.endIndex ? scenes[scenes.startIndex] : scenes[nextIndex]
-    }
-}
  
 // MARK: - ContentView
  
@@ -82,11 +29,12 @@ struct ContentView: View {
  
     @State private var gameState   = GameState.menu
     @State private var runtime     = GameRuntime()
-    @State private var selectedScene = MenuScene.hongKong
+    @State private var selection   = TimeTravelSelection()
  
     private final class SceneRefs {
         var camera: Entity?
         var worldRoot: Entity?
+        var destinationRoot: Entity?
     }
 
     /// Keeps mutable RealityKit and player state out of SwiftUI observation.
@@ -122,41 +70,21 @@ struct ContentView: View {
             sceneView
             #endif
  
-            // ── Start menu overlay ────────────────────────────────────────────
             if gameState == .menu {
                 StartMenuView(
-                    selectedSceneTitle: selectedScene.title,
-                    onToggleScene: {
-                        selectedScene = selectedScene.next()
-                    },
+                    selection: selection,
+                    onSelectScene: selectScene,
+                    onYearChange: updateYear,
                     onStart: startGame
                 )
                 .zIndex(1)
             }
  
-            // ── HUD (gameplay only) ───────────────────────────────────────────
             if gameState == .playing {
                 #if os(visionOS)
-                VStack(spacing: 12) {
-                    Text("Immersive space active")
-                        .font(.headline)
-                    Button("Return to Menu", action: exitGame)
-                        .buttonStyle(.borderedProminent)
-                }
-                .padding(24)
-                .background(.ultraThinMaterial)
-                .clipShape(RoundedRectangle(cornerRadius: 18))
+                visionStatusPanel
                 #else
-                VStack {
-                    Spacer()
-                    Text("WASD — walk   ·   Space — jump   ·   Drag — look")
-                        .font(.caption)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(hudBackground)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                }
-                .padding()
+                gameplayHUD
                 #endif
             }
         }
@@ -173,6 +101,11 @@ struct ContentView: View {
             stopKeyboardMonitoring()
             #endif
         }
+        #if !os(visionOS)
+        .onChange(of: selection) { _, _ in
+            rebuildWindowScene()
+        }
+        #endif
     }
 
     @ViewBuilder
@@ -217,6 +150,68 @@ struct ContentView: View {
         #endif
     }
  
+    private var gameplayHUD: some View {
+        VStack {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("WASD walk  |  Shift sprint  |  Drag look")
+                        .font(.system(size: 12, weight: .bold, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.7))
+
+                    DestinationSelectorView(
+                        selectedScene: selection.scene,
+                        onSelectScene: selectScene,
+                        compact: true
+                    )
+
+                    TimeScrubberView(
+                        year: selection.clampedYear,
+                        onYearChange: updateYear,
+                        compact: true
+                    )
+                }
+                .padding(18)
+                .frame(width: 360, alignment: .leading)
+                .background(hudBackground)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 24)
+                        .strokeBorder(.white.opacity(0.12), lineWidth: 1)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 24))
+
+                Spacer()
+            }
+
+            Spacer()
+        }
+        .padding(20)
+    }
+
+    private var visionStatusPanel: some View {
+        VStack {
+            HStack {
+                Spacer()
+
+                VStack(alignment: .trailing, spacing: 8) {
+                    Text("Immersive portal active")
+                        .font(.system(size: 13, weight: .bold, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.65))
+                    Text("\(selection.scene.title) • \(selection.formattedYear)")
+                        .font(.system(size: 18, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                    Button("Return to Menu", action: exitGame)
+                        .buttonStyle(.borderedProminent)
+                }
+                .padding(18)
+                .background(.ultraThinMaterial)
+                .clipShape(RoundedRectangle(cornerRadius: 20))
+            }
+
+            Spacer()
+        }
+        .padding(24)
+    }
+
     // MARK: - Mouse look gesture
 
     @ViewBuilder
@@ -271,32 +266,13 @@ struct ContentView: View {
         let grid = makeGridEntity(halfExtent: 100, spacing: 1.0)
         root.addChild(grid)
  
-        // ── Environment root (dynamic USDZ assets) ────────────────────────────
-        let envRoot = Entity()
-        envRoot.name = "environmentRoot"
-        root.addChild(envRoot)
-        runtime.envManager.setRoot(envRoot)
+        let destinationRoot = Entity()
+        destinationRoot.name = "destinationRoot"
+        destinationRoot.position = selection.scene.position
+        root.addChild(destinationRoot)
+        runtime.scene.destinationRoot = destinationRoot
  
-        // ── Demo cube ─────────────────────────────────────────────────────────
-        let boxSize: SIMD3<Float> = [0.2, 0.2, 0.2]
-        let boxEntity = Entity()
-        boxEntity.components.set(ModelComponent(
-            mesh: .generateBox(size: boxSize),
-            materials: [SimpleMaterial(color: .red, isMetallic: true)]
-        ))
-        boxEntity.components.set(SpinComponent())
-
-        // InputTargetComponent + CollisionComponent + HoverEffectComponent are
-        // visionOS/real-device AR features. On macOS they trigger the video-light-spill
-        // GPU prewarm and engine:throttleGhosted.rematerial errors that freeze the app.
-        #if (os(iOS) && !targetEnvironment(simulator)) || os(visionOS)
-        boxEntity.components.set(InputTargetComponent())
-        boxEntity.components.set(CollisionComponent(shapes: [.generateBox(size: boxSize)]))
-        boxEntity.components.set(HoverEffectComponent())
-        #endif
- 
-        boxEntity.position = [0, boxSize.y / 2, -2]
-        root.addChild(boxEntity)
+        rebuildWindowScene()
  
         // ── Platform-specific camera / anchoring ──────────────────────────────
         #if os(visionOS)
@@ -362,26 +338,16 @@ struct ContentView: View {
         #endif
     }
 
-    private func loadSelectedScene() {
-        let scene = selectedScene
+    private func rebuildWindowScene() {
+        guard let destinationRoot = runtime.scene.destinationRoot else { return }
 
-        runtime.sceneLoadTask?.cancel()
-        runtime.sceneLoadTask = Task { @MainActor in
-            runtime.envManager.clearAll()
-
-            do {
-                try await runtime.envManager.loadFromBundle(
-                    name: scene.assetName,
-                    id: scene.assetID,
-                    position: scene.position,
-                    scale: scene.scale
-                )
-            } catch is CancellationError {
-                return
-            } catch {
-                print("[ContentView] Failed to load scene '\(scene.title)': \(error)")
-            }
+        for child in Array(destinationRoot.children) {
+            child.removeFromParent()
         }
+
+        let placeholder = PlaceholderSceneBuilder.makeScene(for: selection, interactive: true)
+        destinationRoot.position = selection.scene.position
+        destinationRoot.addChild(placeholder)
     }
 
     #if os(macOS) || (os(iOS) && targetEnvironment(simulator))
@@ -475,7 +441,7 @@ struct ContentView: View {
                 return
             }
 
-            switch await openImmersiveSpace(id: Self.immersiveSpaceID, value: selectedScene) {
+            switch await openImmersiveSpace(id: Self.immersiveSpaceID, value: selection) {
             case .opened:
                 gameState = .playing
                 immersiveSpaceIsOpen = true
@@ -486,7 +452,7 @@ struct ContentView: View {
             }
         }
         #else
-        loadSelectedScene()
+        rebuildWindowScene()
         lastDragLocation = nil
         runtime.player.clearInput()
         gameState = .playing
@@ -508,6 +474,14 @@ struct ContentView: View {
         #else
         gameState = .menu
         #endif
+    }
+
+    private func selectScene(_ scene: MenuScene) {
+        selection.scene = scene
+    }
+
+    private func updateYear(_ year: Int) {
+        selection.year = min(max(year, TimeTravelSelection.minYear), TimeTravelSelection.maxYear)
     }
 }
  

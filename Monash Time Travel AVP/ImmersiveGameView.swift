@@ -10,12 +10,12 @@ import SwiftUI
 import RealityKit
 
 struct ImmersiveGameView: View {
-    let selectedScene: MenuScene
-
     @State private var runtime = GameRuntime()
+    @State private var selection: TimeTravelSelection
 
     private final class SceneRefs {
         var worldRoot: Entity?
+        var destinationRoot: Entity?
         var skyDome: Entity?
         var imageBasedLight: Entity?
     }
@@ -32,13 +32,21 @@ struct ImmersiveGameView: View {
         var sceneLoadTask: Task<Void, Never>?
     }
 
+    init(selection: TimeTravelSelection) {
+        _selection = State(initialValue: selection)
+    }
+
     var body: some View {
-        RealityView { content in
-            setupScene(content: content)
-        } update: { _ in
+        ZStack(alignment: .topLeading) {
+            RealityView { content in
+                setupScene(content: content)
+            } update: { _ in
+            }
+            .focusable()
+            .preferredSurroundingsEffect(.dark)
+
+            overlayPanel
         }
-        .focusable()
-        .preferredSurroundingsEffect(.dark)
         .onAppear {
             runtime.player.clearInput()
             runtime.player.position = [0, runtime.player.eyeHeight, 0]
@@ -51,9 +59,9 @@ struct ImmersiveGameView: View {
             runtime.sceneLoadTask = nil
             runtime.isSceneReady = false
         }
-        .onChange(of: selectedScene) { _, _ in
+        .onChange(of: selection) { _, _ in
             guard runtime.isSceneReady else { return }
-            loadScene()
+            rebuildDestination()
         }
         .onKeyPress(phases: .down) { press in
             runtime.player.setSprinting(press.modifiers.contains(.shift))
@@ -78,6 +86,11 @@ struct ImmersiveGameView: View {
         worldRoot.name = "immersiveWorldRoot"
         content.add(worldRoot)
         runtime.scene.worldRoot = worldRoot
+
+        let destinationRoot = Entity()
+        destinationRoot.name = "immersiveDestinationRoot"
+        worldRoot.addChild(destinationRoot)
+        runtime.scene.destinationRoot = destinationRoot
 
         let environmentRoot = Entity()
         environmentRoot.name = "immersiveEnvironmentRoot"
@@ -112,8 +125,6 @@ struct ImmersiveGameView: View {
     private func loadScene() {
         guard runtime.isSceneReady else { return }
 
-        let scene = selectedScene
-
         runtime.sceneLoadTask?.cancel()
         runtime.sceneLoadTask = Task { @MainActor in
             runtime.player.clearInput()
@@ -126,19 +137,26 @@ struct ImmersiveGameView: View {
                 runtime.environmentResource = environment
                 applySkyDome(using: try loadVisibleSkyTexture())
                 applyImageBasedLighting(using: environment)
-
-                try await runtime.envManager.loadFromBundle(
-                    name: scene.assetName,
-                    id: scene.assetID,
-                    position: scene.immersivePosition,
-                    scale: scene.scale
-                )
             } catch is CancellationError {
                 return
             } catch {
-                print("[ImmersiveGameView] Failed to load immersive scene '\(scene.title)': \(error)")
+                print("[ImmersiveGameView] Failed to load immersive environment: \(error)")
             }
+
+            rebuildDestination()
         }
+    }
+
+    private func rebuildDestination() {
+        guard let destinationRoot = runtime.scene.destinationRoot else { return }
+
+        for child in Array(destinationRoot.children) {
+            child.removeFromParent()
+        }
+
+        let placeholder = PlaceholderSceneBuilder.makeScene(for: selection, interactive: true)
+        destinationRoot.position = selection.scene.immersivePosition
+        destinationRoot.addChild(placeholder)
     }
 
     private func loadVisibleSkyTexture() throws -> TextureResource {
@@ -181,6 +199,44 @@ struct ImmersiveGameView: View {
 
         lightEntity.components.set(ImageBasedLightComponent(source: .single(environment), intensityExponent: 1.0))
         worldRoot.components.set(ImageBasedLightReceiverComponent(imageBasedLight: lightEntity))
+    }
+
+    private var overlayPanel: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("TIME PORTAL CONTROL")
+                .font(.system(size: 12, weight: .bold, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.62))
+
+            DestinationSelectorView(
+                selectedScene: selection.scene,
+                onSelectScene: { selection.scene = $0 },
+                compact: true
+            )
+
+            TimeScrubberView(
+                year: selection.clampedYear,
+                onYearChange: { selection.year = $0 },
+                compact: true
+            )
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(selection.eraTitle)
+                    .font(.system(size: 13, weight: .bold, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.65))
+                Text(selection.eraDescription)
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.78))
+            }
+        }
+        .padding(18)
+        .frame(width: 360, alignment: .leading)
+        .background(.ultraThinMaterial)
+        .overlay(
+            RoundedRectangle(cornerRadius: 24)
+                .strokeBorder(.white.opacity(0.12), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 24))
+        .padding(22)
     }
 }
 #endif
