@@ -43,13 +43,15 @@ struct StartMenuView: View {
 
                     MenuButton(title: "Start Game", isPrimary: true, action: onStart)
 
+                    #if os(macOS)
                     MenuButton(title: "Quit") {
-                        #if os(macOS)
                         NSApplication.shared.terminate(nil)
-                        #else
-                        exit(0)
-                        #endif
                     }
+                    #elseif os(iOS)
+                    MenuButton(title: "Quit") {
+                        exit(0)
+                    }
+                    #endif
                 }
             }
             .padding(64)

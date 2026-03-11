@@ -174,4 +174,16 @@ final class EnvironmentManager {
         extractedBundleAssetURLs[cacheKey] = url
         return url
     }
+
+    func loadEnvironmentResource(
+        name: String,
+        fileExtension: String = "hdr"
+    ) throws -> EnvironmentResource {
+        do {
+            return try EnvironmentResource.load(named: name, in: .main)
+        } catch {
+            let resourceURL = try bundleAssetURL(name: name, fileExtension: fileExtension)
+            return try EnvironmentResource.__load(contentsOf: resourceURL, withName: name)
+        }
+    }
 }

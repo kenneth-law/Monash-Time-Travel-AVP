@@ -18,7 +18,7 @@ enum GameState {
     case playing
 }
 
-enum MenuScene: CaseIterable {
+enum MenuScene: String, CaseIterable, Codable {
     case hongKong
 
     var title: String {
@@ -49,6 +49,13 @@ enum MenuScene: CaseIterable {
         }
     }
 
+    var immersivePosition: SIMD3<Float> {
+        switch self {
+        case .hongKong:
+            return [0, -1.75, 0]
+        }
+    }
+
     var scale: Float {
         switch self {
         case .hongKong:
@@ -67,6 +74,9 @@ enum MenuScene: CaseIterable {
 // MARK: - ContentView
  
 struct ContentView: View {
+    #if os(visionOS)
+    private static let immersiveSpaceID = "game-space"
+    #endif
  
     // MARK: State
  
@@ -97,12 +107,20 @@ struct ContentView: View {
  
     /// Previous drag location, used to compute per-frame mouse-look deltas.
     @State private var lastDragLocation: CGPoint? = nil
+
+    #if os(visionOS)
+    @State private var immersiveSpaceIsOpen = false
+    @Environment(\.openImmersiveSpace) private var openImmersiveSpace
+    @Environment(\.dismissImmersiveSpace) private var dismissImmersiveSpace
+    #endif
  
     // MARK: Body
  
     var body: some View {
         ZStack {
+            #if !os(visionOS)
             sceneView
+            #endif
  
             // ── Start menu overlay ────────────────────────────────────────────
             if gameState == .menu {
@@ -111,17 +129,24 @@ struct ContentView: View {
                     onToggleScene: {
                         selectedScene = selectedScene.next()
                     },
-                    onStart: {
-                    loadSelectedScene()
-                    lastDragLocation = nil
-                    runtime.player.clearInput()
-                    gameState = .playing
-                })
+                    onStart: startGame
+                )
                 .zIndex(1)
             }
  
             // ── HUD (gameplay only) ───────────────────────────────────────────
             if gameState == .playing {
+                #if os(visionOS)
+                VStack(spacing: 12) {
+                    Text("Immersive space active")
+                        .font(.headline)
+                    Button("Return to Menu", action: exitGame)
+                        .buttonStyle(.borderedProminent)
+                }
+                .padding(24)
+                .background(.ultraThinMaterial)
+                .clipShape(RoundedRectangle(cornerRadius: 18))
+                #else
                 VStack {
                     Spacer()
                     Text("WASD — walk   ·   Space — jump   ·   Drag — look")
@@ -132,6 +157,7 @@ struct ContentView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                 }
                 .padding()
+                #endif
             }
         }
         .onAppear {
@@ -151,6 +177,14 @@ struct ContentView: View {
 
     @ViewBuilder
     private var sceneView: some View {
+        #if os(visionOS)
+        let baseView = RealityView { content in
+            setupScene(content: content)
+        } update: { _ in
+        }
+        .gesture(mouseLookGesture)
+        .focusable()
+        #else
         let baseView = RealityView { content in
             #if os(macOS) || (os(iOS) && targetEnvironment(simulator))
             if let skybox = loadSkyboxResource() {
@@ -162,8 +196,9 @@ struct ContentView: View {
         }
         .gesture(mouseLookGesture)
         .focusable()
+        #endif
 
-        #if os(iOS) && !targetEnvironment(simulator)
+        #if os(iOS) || os(visionOS)
         baseView
             .simultaneousGesture(tapEntityGesture)
             .onKeyPress(phases: .down) { press in
@@ -189,7 +224,7 @@ struct ContentView: View {
         #if os(macOS)
         Color.black.opacity(0.65)
         #else
-        .ultraThinMaterial
+        Rectangle().fill(.ultraThinMaterial)
         #endif
     }
  
@@ -254,7 +289,7 @@ struct ContentView: View {
         // InputTargetComponent + CollisionComponent + HoverEffectComponent are
         // visionOS/real-device AR features. On macOS they trigger the video-light-spill
         // GPU prewarm and engine:throttleGhosted.rematerial errors that freeze the app.
-        #if os(iOS) && !targetEnvironment(simulator)
+        #if (os(iOS) && !targetEnvironment(simulator)) || os(visionOS)
         boxEntity.components.set(InputTargetComponent())
         boxEntity.components.set(CollisionComponent(shapes: [.generateBox(size: boxSize)]))
         boxEntity.components.set(HoverEffectComponent())
@@ -264,8 +299,10 @@ struct ContentView: View {
         root.addChild(boxEntity)
  
         // ── Platform-specific camera / anchoring ──────────────────────────────
-        #if os(iOS) && !targetEnvironment(simulator)
-        // visionOS hardware: headset IS the camera.
+        #if os(visionOS)
+        // In a visionOS window, the system manages the viewer camera.
+        #elseif os(iOS) && !targetEnvironment(simulator)
+        // iOS/AR platforms use device tracking as the camera.
         content.camera = .spatialTracking
         let anchorTarget: AnchoringComponent.Target = .plane(
             .horizontal,
@@ -319,7 +356,7 @@ struct ContentView: View {
         #if os(macOS) || (os(iOS) && targetEnvironment(simulator))
         runtime.scene.camera?.position = newPosition
  
-        #elseif os(iOS) && !targetEnvironment(simulator)
+        #elseif (os(iOS) && !targetEnvironment(simulator)) || os(visionOS)
         let displacement = newPosition - SIMD3<Float>(0, runtime.player.eyeHeight, 0)
         runtime.scene.worldRoot?.position = SIMD3<Float>(-displacement.x, 0, -displacement.z)
         #endif
@@ -354,21 +391,7 @@ struct ContentView: View {
         }
 
         do {
-            let resource: EnvironmentResource
-
-            do {
-                resource = try EnvironmentResource.load(named: "clarens_midday_4k", in: .main)
-            } catch {
-                let hdrURL = try runtime.envManager.bundleAssetURL(
-                    name: "clarens_midday_4k",
-                    fileExtension: "hdr"
-                )
-                resource = try EnvironmentResource.__load(
-                    contentsOf: hdrURL,
-                    withName: "clarens_midday_4k"
-                )
-            }
-
+            let resource = try runtime.envManager.loadEnvironmentResource(name: "clarens_midday_4k")
             runtime.skyboxResource = resource
             return resource
         } catch {
@@ -442,6 +465,49 @@ struct ContentView: View {
             bindTarget: .transform
         )
         entity.playAnimation(spinAnimation)
+    }
+
+    private func startGame() {
+        #if os(visionOS)
+        Task { @MainActor in
+            guard !immersiveSpaceIsOpen else {
+                gameState = .playing
+                return
+            }
+
+            switch await openImmersiveSpace(id: Self.immersiveSpaceID, value: selectedScene) {
+            case .opened:
+                gameState = .playing
+                immersiveSpaceIsOpen = true
+            case .error, .userCancelled:
+                gameState = .menu
+            @unknown default:
+                gameState = .menu
+            }
+        }
+        #else
+        loadSelectedScene()
+        lastDragLocation = nil
+        runtime.player.clearInput()
+        gameState = .playing
+        #endif
+    }
+
+    private func exitGame() {
+        #if os(visionOS)
+        Task { @MainActor in
+            guard immersiveSpaceIsOpen else {
+                gameState = .menu
+                return
+            }
+
+            await dismissImmersiveSpace()
+            immersiveSpaceIsOpen = false
+            gameState = .menu
+        }
+        #else
+        gameState = .menu
+        #endif
     }
 }
  

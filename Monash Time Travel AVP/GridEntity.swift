@@ -7,7 +7,11 @@
 
 import RealityKit
 import CoreGraphics
+#if os(macOS)
 import AppKit
+#else
+import UIKit
+#endif
 
 /// Creates a ground-plane grid entity centred at the world origin (y = 0).
 ///
