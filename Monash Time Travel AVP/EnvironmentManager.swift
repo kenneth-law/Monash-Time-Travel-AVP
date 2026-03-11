@@ -8,6 +8,11 @@
 import RealityKit
 import Foundation
 import Observation
+#if os(macOS)
+import AppKit
+#else
+import UIKit
+#endif
 
 /// Manages the lifecycle of dynamically loaded USDZ assets in the scene.
 ///
@@ -16,6 +21,7 @@ import Observation
 /// `loadFromBundle` or `loadFromURL` from async contexts (e.g. button actions
 /// or `.task {}` modifiers) to place assets, and `remove(id:)` / `clearAll()`
 /// to remove them.
+@MainActor
 @Observable
 final class EnvironmentManager {
 
@@ -30,6 +36,9 @@ final class EnvironmentManager {
 
     /// Maps asset IDs to their loaded entities for later removal.
     private var loadedAssets: [AssetID: Entity] = [:]
+
+    /// Temporary extracted URLs for USDZ files stored inside asset catalogs.
+    private var extractedBundleAssetURLs: [String: URL] = [:]
 
     // MARK: - Setup
 
@@ -67,7 +76,8 @@ final class EnvironmentManager {
         // Remove any pre-existing asset with the same id
         remove(id: id)
 
-        let entity = try await Entity(named: name, in: .main)
+        let assetURL = try bundleAssetURL(name: name, fileExtension: "usdz")
+        let entity = try await Entity(contentsOf: assetURL)
         place(entity: entity, id: id, position: position,
               orientation: orientation, scale: scale, under: root)
     }
@@ -136,5 +146,32 @@ final class EnvironmentManager {
         entity.scale = SIMD3<Float>(repeating: scale)
         root.addChild(entity)
         loadedAssets[id] = entity
+    }
+
+    func bundleAssetURL(name: String, fileExtension: String) throws -> URL {
+        if let url = Bundle.main.url(forResource: name, withExtension: fileExtension) {
+            return url
+        }
+
+        let cacheKey = "\(name).\(fileExtension)"
+
+        if let cachedURL = extractedBundleAssetURLs[cacheKey] {
+            return cachedURL
+        }
+
+        guard let dataAsset = NSDataAsset(name: name) else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Monash-Time-Travel-AVP-\(name)")
+            .appendingPathExtension(fileExtension)
+
+        if !FileManager.default.fileExists(atPath: url.path) {
+            try dataAsset.data.write(to: url, options: Data.WritingOptions.atomic)
+        }
+
+        extractedBundleAssetURLs[cacheKey] = url
+        return url
     }
 }

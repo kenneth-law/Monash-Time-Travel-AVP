@@ -4,70 +4,215 @@
 //
 //  Created by Ken Law on 11/3/2026.
 //
-
+ 
 import SwiftUI
 import RealityKit
+#if os(macOS)
+import AppKit
+#endif
+ 
+// MARK: - Game state
+ 
+enum GameState {
+    case menu
+    case playing
+}
 
-struct ContentView: View {
+enum MenuScene: CaseIterable {
+    case hongKong
 
-    // MARK: - State
-
-    @State private var player = PlayerController()
-    @State private var envManager = EnvironmentManager()
-
-    /// The camera entity (macOS / iOS Simulator only).
-    /// On visionOS hardware the headset IS the camera — no entity is created.
-    @State private var cameraEntity: Entity? = nil
-
-    /// The stationary world root. On visionOS hardware, locomotion is achieved
-    /// by translating this entity opposite to player movement.
-    @State private var worldRoot: Entity? = nil
-
-    // MARK: - Body
-
-    var body: some View {
-        ZStack {
-            // TimelineView drives the RealityView update closure at display
-            // refresh rate, giving us a per-frame game loop.
-            TimelineView(.animation) { timeline in
-                RealityView { content in
-                    setupScene(content: content)
-                } update: { content in
-                    updateScene(time: timeline.date)
-                }
-                .gesture(tapEntityGesture)
-                // focusable() is required so .onKeyPress events are delivered.
-                .focusable()
-                .onKeyPress(phases: .down) { press in
-                    if let char = press.characters.first {
-                        player.keyDown(char)
-                    }
-                    return .handled
-                }
-                .onKeyPress(phases: .up) { press in
-                    if let char = press.characters.first {
-                        player.keyUp(char)
-                    }
-                    return .handled
-                }
-            }
-
-            // HUD overlay
-            VStack {
-                Spacer()
-                Text("WASD — walk   ·   Space — jump")
-                    .font(.caption)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(.ultraThinMaterial)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-            }
-            .padding()
+    var title: String {
+        switch self {
+        case .hongKong:
+            return "Hong Kong"
         }
     }
 
-    // MARK: - Gesture
+    var assetName: String {
+        switch self {
+        case .hongKong:
+            return "Full_Gameready_City_Buildings_IV_HongKong"
+        }
+    }
 
+    var assetID: String {
+        switch self {
+        case .hongKong:
+            return "scene.hong-kong"
+        }
+    }
+
+    var position: SIMD3<Float> {
+        switch self {
+        case .hongKong:
+            return [0, 0, -12]
+        }
+    }
+
+    var scale: Float {
+        switch self {
+        case .hongKong:
+            return 0.08
+        }
+    }
+
+    func next() -> MenuScene {
+        let scenes = Self.allCases
+        guard let currentIndex = scenes.firstIndex(of: self) else { return self }
+        let nextIndex = scenes.index(after: currentIndex)
+        return nextIndex == scenes.endIndex ? scenes[scenes.startIndex] : scenes[nextIndex]
+    }
+}
+ 
+// MARK: - ContentView
+ 
+struct ContentView: View {
+ 
+    // MARK: State
+ 
+    @State private var gameState   = GameState.menu
+    @State private var runtime     = GameRuntime()
+    @State private var selectedScene = MenuScene.hongKong
+ 
+    private final class SceneRefs {
+        var camera: Entity?
+        var worldRoot: Entity?
+    }
+
+    /// Keeps mutable RealityKit and player state out of SwiftUI observation.
+    @MainActor
+    private final class GameRuntime {
+        let player = PlayerController()
+        let envManager = EnvironmentManager()
+        let scene = SceneRefs()
+        var updateSubscription: EventSubscription?
+        var sceneLoadTask: Task<Void, Never>?
+        var skyboxResource: EnvironmentResource?
+
+        #if os(macOS)
+        var keyDownMonitor: Any?
+        var keyUpMonitor: Any?
+        #endif
+    }
+ 
+    /// Previous drag location, used to compute per-frame mouse-look deltas.
+    @State private var lastDragLocation: CGPoint? = nil
+ 
+    // MARK: Body
+ 
+    var body: some View {
+        ZStack {
+            sceneView
+ 
+            // ── Start menu overlay ────────────────────────────────────────────
+            if gameState == .menu {
+                StartMenuView(
+                    selectedSceneTitle: selectedScene.title,
+                    onToggleScene: {
+                        selectedScene = selectedScene.next()
+                    },
+                    onStart: {
+                    loadSelectedScene()
+                    lastDragLocation = nil
+                    runtime.player.clearInput()
+                    gameState = .playing
+                })
+                .zIndex(1)
+            }
+ 
+            // ── HUD (gameplay only) ───────────────────────────────────────────
+            if gameState == .playing {
+                VStack {
+                    Spacer()
+                    Text("WASD — walk   ·   Space — jump   ·   Drag — look")
+                        .font(.caption)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(hudBackground)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+                .padding()
+            }
+        }
+        .onAppear {
+            #if os(macOS)
+            startKeyboardMonitoring()
+            #endif
+        }
+        .onDisappear {
+            runtime.player.clearInput()
+            runtime.sceneLoadTask?.cancel()
+            runtime.sceneLoadTask = nil
+            #if os(macOS)
+            stopKeyboardMonitoring()
+            #endif
+        }
+    }
+
+    @ViewBuilder
+    private var sceneView: some View {
+        let baseView = RealityView { content in
+            #if os(macOS) || (os(iOS) && targetEnvironment(simulator))
+            if let skybox = loadSkyboxResource() {
+                content.environment = .skybox(skybox)
+            }
+            #endif
+            setupScene(content: content)
+        } update: { _ in
+        }
+        .gesture(mouseLookGesture)
+        .focusable()
+
+        #if os(iOS) && !targetEnvironment(simulator)
+        baseView
+            .simultaneousGesture(tapEntityGesture)
+            .onKeyPress(phases: .down) { press in
+                guard gameState == .playing else { return .ignored }
+                runtime.player.setSprinting(press.modifiers.contains(.shift))
+                if let char = press.characters.first { runtime.player.keyDown(char) }
+                return .handled
+            }
+            .onKeyPress(phases: .up) { press in
+                runtime.player.setSprinting(press.modifiers.contains(.shift))
+                if let char = press.characters.first { runtime.player.keyUp(char) }
+                return .handled
+            }
+        #else
+        baseView
+        #endif
+    }
+ 
+    // MARK: - Mouse look gesture
+
+    @ViewBuilder
+    private var hudBackground: some View {
+        #if os(macOS)
+        Color.black.opacity(0.65)
+        #else
+        .ultraThinMaterial
+        #endif
+    }
+ 
+    /// Click-and-drag to rotate the camera. Uses location deltas rather than
+    /// onContinuousHover so it only fires during an active drag.
+    var mouseLookGesture: some Gesture {
+        DragGesture(minimumDistance: 1)
+            .onChanged { value in
+                guard gameState == .playing else {
+                    lastDragLocation = nil
+                    return
+                }
+                if let last = lastDragLocation {
+                    runtime.player.mouseMove(dx: Float(value.location.x - last.x),
+                                             dy: Float(value.location.y - last.y))
+                }
+                lastDragLocation = value.location
+            }
+            .onEnded { _ in lastDragLocation = nil }
+    }
+ 
+    // MARK: - Tap gesture
+ 
     var tapEntityGesture: some Gesture {
         TapGesture()
             .targetedToEntity(where: .has(SpinComponent.self))
@@ -75,48 +220,52 @@ struct ContentView: View {
                 try? spinEntity(gesture.entity)
             }
     }
-
-    // MARK: - Scene Setup (runs once)
-
+ 
+    // MARK: - Scene Setup (runs once inside RealityView make closure)
+ 
     private func setupScene(content: any RealityViewContentProtocol) {
-
+        guard runtime.scene.worldRoot == nil else { return }
+ 
         // ── World root ────────────────────────────────────────────────────────
-        // All static scene geometry and dynamic assets live under worldRoot.
-        // On visionOS hardware we translate worldRoot for locomotion.
         let root = Entity()
         root.name = "worldRoot"
         content.add(root)
-        worldRoot = root
-
+        runtime.scene.worldRoot = root
+ 
         // ── Ground grid ───────────────────────────────────────────────────────
         let grid = makeGridEntity(halfExtent: 100, spacing: 1.0)
         root.addChild(grid)
-
+ 
         // ── Environment root (dynamic USDZ assets) ────────────────────────────
         let envRoot = Entity()
         envRoot.name = "environmentRoot"
         root.addChild(envRoot)
-        envManager.setRoot(envRoot)
-
-        // ── Demo cube (preserved, placed 2 m ahead on the floor) ─────────────
+        runtime.envManager.setRoot(envRoot)
+ 
+        // ── Demo cube ─────────────────────────────────────────────────────────
         let boxSize: SIMD3<Float> = [0.2, 0.2, 0.2]
         let boxEntity = Entity()
-        boxEntity.components.set([
-            ModelComponent(
-                mesh: .generateBox(size: boxSize),
-                materials: [SimpleMaterial(color: .red, isMetallic: true)]
-            ),
-            InputTargetComponent(),
-            HoverEffectComponent(),
-            CollisionComponent(shapes: [.generateBox(size: boxSize)]),
-            SpinComponent()
-        ])
+        boxEntity.components.set(ModelComponent(
+            mesh: .generateBox(size: boxSize),
+            materials: [SimpleMaterial(color: .red, isMetallic: true)]
+        ))
+        boxEntity.components.set(SpinComponent())
+
+        // InputTargetComponent + CollisionComponent + HoverEffectComponent are
+        // visionOS/real-device AR features. On macOS they trigger the video-light-spill
+        // GPU prewarm and engine:throttleGhosted.rematerial errors that freeze the app.
+        #if os(iOS) && !targetEnvironment(simulator)
+        boxEntity.components.set(InputTargetComponent())
+        boxEntity.components.set(CollisionComponent(shapes: [.generateBox(size: boxSize)]))
+        boxEntity.components.set(HoverEffectComponent())
+        #endif
+ 
         boxEntity.position = [0, boxSize.y / 2, -2]
         root.addChild(boxEntity)
-
+ 
         // ── Platform-specific camera / anchoring ──────────────────────────────
         #if os(iOS) && !targetEnvironment(simulator)
-        // visionOS hardware: headset = camera; anchor worldRoot to the floor.
+        // visionOS hardware: headset IS the camera.
         content.camera = .spatialTracking
         let anchorTarget: AnchoringComponent.Target = .plane(
             .horizontal,
@@ -124,58 +273,166 @@ struct ContentView: View {
             minimumBounds: .one
         )
         root.components.set(AnchoringComponent(anchorTarget))
-
+ 
         #elseif os(macOS) || (os(iOS) && targetEnvironment(simulator))
         // macOS / iOS Simulator: manual perspective camera at eye level.
         let camera = Entity()
         camera.name = "playerCamera"
         camera.components.set(PerspectiveCameraComponent())
-        // Start at eye level, facing -Z (into the scene toward the cube).
-        camera.position = player.position
-        camera.look(at: player.position + SIMD3<Float>(0, 0, -1),
-                    from: player.position,
-                    relativeTo: nil)
-        // Camera is NOT under worldRoot — it moves in absolute world space.
+        camera.position = runtime.player.position
+        camera.look(
+            at: runtime.player.position + SIMD3<Float>(0, 0, -1),
+            from: runtime.player.position,
+            relativeTo: nil
+        )
+        // Camera lives in absolute world space, not under worldRoot.
         content.add(camera)
-        cameraEntity = camera
+        runtime.scene.camera = camera
         #endif
+
+        runtime.updateSubscription = content.subscribe(to: SceneEvents.Update.self) { event in
+            updateScene(deltaTime: Float(min(event.deltaTime, 0.1)))
+        }
     }
-
+ 
     // MARK: - Per-Frame Update
-
-    private func updateScene(time: Date) {
-        let dt = Float(min(time.timeIntervalSince(player.lastUpdateTime), 0.1))
-        player.lastUpdateTime = time
+ 
+    private func updateScene(deltaTime dt: Float) {
         guard dt > 0 else { return }
 
-        // ── Extract camera yaw for direction-relative movement ────────────────
+        // Apply camera orientation every frame (even during menu) so the GPU
+        // rendering path is warm before the user clicks Start.
         #if os(macOS) || (os(iOS) && targetEnvironment(simulator))
-        if let cam = cameraEntity {
-            let q = cam.orientation
-            player.yaw = atan2(
-                2 * (q.vector.y * q.vector.w + q.vector.x * q.vector.z),
-                1 - 2 * (q.vector.y * q.vector.y + q.vector.z * q.vector.z)
-            )
+        if let cam = runtime.scene.camera {
+            let yawQuat   = simd_quatf(angle: runtime.player.yaw,   axis: [0, 1, 0])
+            let pitchQuat = simd_quatf(angle: runtime.player.pitch, axis: [1, 0, 0])
+            cam.orientation = yawQuat * pitchQuat
         }
         #endif
 
-        // ── Step physics ──────────────────────────────────────────────────────
-        let newPosition = player.update(deltaTime: dt)
+        guard gameState == .playing else { return }
 
-        // ── Apply to scene ────────────────────────────────────────────────────
+        // Step physics (uses player.yaw for direction-relative WASD movement)
+        let newPosition = runtime.player.update(deltaTime: dt)
+ 
+        // Apply new position to scene
         #if os(macOS) || (os(iOS) && targetEnvironment(simulator))
-        cameraEntity?.position = newPosition
-
+        runtime.scene.camera?.position = newPosition
+ 
         #elseif os(iOS) && !targetEnvironment(simulator)
-        // On visionOS hardware: move the world opposite to player displacement
-        // to simulate walking while the headset tracks head position.
-        let displacement = newPosition - SIMD3<Float>(0, player.eyeHeight, 0)
-        worldRoot?.position = SIMD3<Float>(-displacement.x, 0, -displacement.z)
+        let displacement = newPosition - SIMD3<Float>(0, runtime.player.eyeHeight, 0)
+        runtime.scene.worldRoot?.position = SIMD3<Float>(-displacement.x, 0, -displacement.z)
         #endif
     }
 
-    // MARK: - Spin (preserved from original)
+    private func loadSelectedScene() {
+        let scene = selectedScene
 
+        runtime.sceneLoadTask?.cancel()
+        runtime.sceneLoadTask = Task { @MainActor in
+            runtime.envManager.clearAll()
+
+            do {
+                try await runtime.envManager.loadFromBundle(
+                    name: scene.assetName,
+                    id: scene.assetID,
+                    position: scene.position,
+                    scale: scene.scale
+                )
+            } catch is CancellationError {
+                return
+            } catch {
+                print("[ContentView] Failed to load scene '\(scene.title)': \(error)")
+            }
+        }
+    }
+
+    #if os(macOS) || (os(iOS) && targetEnvironment(simulator))
+    private func loadSkyboxResource() -> EnvironmentResource? {
+        if let cached = runtime.skyboxResource {
+            return cached
+        }
+
+        do {
+            let resource: EnvironmentResource
+
+            do {
+                resource = try EnvironmentResource.load(named: "clarens_midday_4k", in: .main)
+            } catch {
+                let hdrURL = try runtime.envManager.bundleAssetURL(
+                    name: "clarens_midday_4k",
+                    fileExtension: "hdr"
+                )
+                resource = try EnvironmentResource.__load(
+                    contentsOf: hdrURL,
+                    withName: "clarens_midday_4k"
+                )
+            }
+
+            runtime.skyboxResource = resource
+            return resource
+        } catch {
+            print("[ContentView] Failed to load skybox: \(error)")
+            return nil
+        }
+    }
+    #endif
+
+    #if os(macOS)
+    private func startKeyboardMonitoring() {
+        guard runtime.keyDownMonitor == nil, runtime.keyUpMonitor == nil else { return }
+
+        runtime.keyDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            guard gameState == .playing else { return event }
+            return handleMacKeyEvent(event, isDown: true) ? nil : event
+        }
+
+        runtime.keyUpMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyUp) { event in
+            return handleMacKeyEvent(event, isDown: false) ? nil : event
+        }
+    }
+
+    private func stopKeyboardMonitoring() {
+        if let monitor = runtime.keyDownMonitor {
+            NSEvent.removeMonitor(monitor)
+            runtime.keyDownMonitor = nil
+        }
+
+        if let monitor = runtime.keyUpMonitor {
+            NSEvent.removeMonitor(monitor)
+            runtime.keyUpMonitor = nil
+        }
+    }
+
+    private func handleMacKeyEvent(_ event: NSEvent, isDown: Bool) -> Bool {
+        let key: Character?
+
+        switch event.keyCode {
+        case 56, 60:
+            runtime.player.setSprinting(isDown)
+            return true
+        case 49:
+            key = " "
+        default:
+            key = event.charactersIgnoringModifiers?.lowercased().first
+        }
+
+        guard let key, ["w", "a", "s", "d", " "].contains(key) else {
+            return false
+        }
+
+        if isDown {
+            runtime.player.keyDown(key)
+        } else {
+            runtime.player.keyUp(key)
+        }
+
+        return true
+    }
+    #endif
+ 
+    // MARK: - Spin helper
+ 
     func spinEntity(_ entity: Entity) throws {
         guard let spinComponent = entity.components[SpinComponent.self] else { return }
         let spinAction = SpinAction(revolutions: 1, localAxis: spinComponent.spinAxis)
@@ -187,7 +444,7 @@ struct ContentView: View {
         entity.playAnimation(spinAnimation)
     }
 }
-
+ 
 #Preview {
     ContentView()
 }
