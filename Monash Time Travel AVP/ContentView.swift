@@ -9,110 +9,181 @@ import SwiftUI
 import RealityKit
 
 struct ContentView: View {
+
+    // MARK: - State
+
+    @State private var player = PlayerController()
+    @State private var envManager = EnvironmentManager()
+
+    /// The camera entity (macOS / iOS Simulator only).
+    /// On visionOS hardware the headset IS the camera — no entity is created.
+    @State private var cameraEntity: Entity? = nil
+
+    /// The stationary world root. On visionOS hardware, locomotion is achieved
+    /// by translating this entity opposite to player movement.
+    @State private var worldRoot: Entity? = nil
+
+    // MARK: - Body
+
     var body: some View {
         ZStack {
-            RealityView { content in
-                // If iOS device that is not the simulator,
-                // use the spatial tracking camera.
-                #if os(iOS) && !targetEnvironment(simulator)
-                content.camera = .spatialTracking
-                #endif
-                createGameScene(content)
-            }.gesture(tapEntityGesture)
-            // When this app runs on macOS or iOS simulator,
-            // add camera controls that orbit the origin.
-            #if os(macOS) || (os(iOS) && targetEnvironment(simulator))
-            .realityViewCameraControls(.orbit)
-            #endif
+            // TimelineView drives the RealityView update closure at display
+            // refresh rate, giving us a per-frame game loop.
+            TimelineView(.animation) { timeline in
+                RealityView { content in
+                    setupScene(content: content)
+                } update: { content in
+                    updateScene(time: timeline.date)
+                }
+                .gesture(tapEntityGesture)
+                // focusable() is required so .onKeyPress events are delivered.
+                .focusable()
+                .onKeyPress(phases: .down) { press in
+                    if let char = press.characters.first {
+                        player.keyDown(char)
+                    }
+                    return .handled
+                }
+                .onKeyPress(phases: .up) { press in
+                    if let char = press.characters.first {
+                        player.keyUp(char)
+                    }
+                    return .handled
+                }
+            }
 
-            // Add instructions to tap the cube.
+            // HUD overlay
             VStack {
                 Spacer()
-                Text("Tap the cube to spin!")
-            }.padding()
+                Text("WASD — walk   ·   Space — jump")
+                    .font(.caption)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(.ultraThinMaterial)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+            .padding()
         }
     }
 
-    /// A gesture that spins entities that have a spin component.
+    // MARK: - Gesture
+
     var tapEntityGesture: some Gesture {
-        TapGesture().targetedToEntity(where: .has(SpinComponent.self))
-            .onEnded({ gesture in
+        TapGesture()
+            .targetedToEntity(where: .has(SpinComponent.self))
+            .onEnded { gesture in
                 try? spinEntity(gesture.entity)
-            })
+            }
     }
 
-    /// Creates a game scene and adds it to the view content.
-    ///
-    /// - Parameter content: The active content for this RealityKit game.
-    fileprivate func createGameScene(_ content: any RealityViewContentProtocol) {
+    // MARK: - Scene Setup (runs once)
+
+    private func setupScene(content: any RealityViewContentProtocol) {
+
+        // ── World root ────────────────────────────────────────────────────────
+        // All static scene geometry and dynamic assets live under worldRoot.
+        // On visionOS hardware we translate worldRoot for locomotion.
+        let root = Entity()
+        root.name = "worldRoot"
+        content.add(root)
+        worldRoot = root
+
+        // ── Ground grid ───────────────────────────────────────────────────────
+        let grid = makeGridEntity(halfExtent: 100, spacing: 1.0)
+        root.addChild(grid)
+
+        // ── Environment root (dynamic USDZ assets) ────────────────────────────
+        let envRoot = Entity()
+        envRoot.name = "environmentRoot"
+        root.addChild(envRoot)
+        envManager.setRoot(envRoot)
+
+        // ── Demo cube (preserved, placed 2 m ahead on the floor) ─────────────
         let boxSize: SIMD3<Float> = [0.2, 0.2, 0.2]
-        // A component that shows a red box model.
-        let boxModel = ModelComponent(
-            mesh: .generateBox(size: boxSize),
-            materials: [SimpleMaterial(color: .red, isMetallic: true)]
-        )
-        // Components that allow interaction and visual feedback.
-        let inputTargetComponent = InputTargetComponent()
-        let hoverComponent = HoverEffectComponent()
-
-        // A component that sets the collision shape.
-        let boxCollision = CollisionComponent(shapes: [.generateBox(size: boxSize)])
-
-        // A component that stores spin information.
-        let spinComponent = SpinComponent()
-
-        // Set all the entity's components.
         let boxEntity = Entity()
         boxEntity.components.set([
-            boxModel, boxCollision, inputTargetComponent, hoverComponent,
-            spinComponent
+            ModelComponent(
+                mesh: .generateBox(size: boxSize),
+                materials: [SimpleMaterial(color: .red, isMetallic: true)]
+            ),
+            InputTargetComponent(),
+            HoverEffectComponent(),
+            CollisionComponent(shapes: [.generateBox(size: boxSize)]),
+            SpinComponent()
         ])
+        boxEntity.position = [0, boxSize.y / 2, -2]
+        root.addChild(boxEntity)
 
-        // Add the entity to the RealityView content.
-        content.add(boxEntity)
-
-        // If iOS device, except simulator.
+        // ── Platform-specific camera / anchoring ──────────────────────────────
         #if os(iOS) && !targetEnvironment(simulator)
-        // Create an anchor target that is any floor surface
-        // greater than or equal to a 1x1m area.
+        // visionOS hardware: headset = camera; anchor worldRoot to the floor.
+        content.camera = .spatialTracking
         let anchorTarget: AnchoringComponent.Target = .plane(
-            .horizontal, classification: .floor,
+            .horizontal,
+            classification: .floor,
             minimumBounds: .one
         )
-        boxEntity.components.set(AnchoringComponent(anchorTarget))
-        // Move boxEntity up by half the box height, so that its base is on the ground.
-        boxEntity.position.y += boxSize.y / 2
-        #elseif os(macOS) || os(iOS)
-        // If macOS, or iOS simulator, add a perspective camera to the scene.
-        let camera = Entity()
-        camera.components.set(PerspectiveCameraComponent())
-        content.add(camera)
+        root.components.set(AnchoringComponent(anchorTarget))
 
-        // Set the camera position and orientation.
-        let cameraLocation: SIMD3<Float> = [1, 1, 2]
-        camera.look(at: .zero, from: cameraLocation, relativeTo: nil)
+        #elseif os(macOS) || (os(iOS) && targetEnvironment(simulator))
+        // macOS / iOS Simulator: manual perspective camera at eye level.
+        let camera = Entity()
+        camera.name = "playerCamera"
+        camera.components.set(PerspectiveCameraComponent())
+        // Start at eye level, facing -Z (into the scene toward the cube).
+        camera.position = player.position
+        camera.look(at: player.position + SIMD3<Float>(0, 0, -1),
+                    from: player.position,
+                    relativeTo: nil)
+        // Camera is NOT under worldRoot — it moves in absolute world space.
+        content.add(camera)
+        cameraEntity = camera
         #endif
     }
 
-    /// Spins an entity around the y-axis.
-    /// - Parameter entity: The entity to spin.
+    // MARK: - Per-Frame Update
+
+    private func updateScene(time: Date) {
+        let dt = Float(min(time.timeIntervalSince(player.lastUpdateTime), 0.1))
+        player.lastUpdateTime = time
+        guard dt > 0 else { return }
+
+        // ── Extract camera yaw for direction-relative movement ────────────────
+        #if os(macOS) || (os(iOS) && targetEnvironment(simulator))
+        if let cam = cameraEntity {
+            let q = cam.orientation
+            player.yaw = atan2(
+                2 * (q.vector.y * q.vector.w + q.vector.x * q.vector.z),
+                1 - 2 * (q.vector.y * q.vector.y + q.vector.z * q.vector.z)
+            )
+        }
+        #endif
+
+        // ── Step physics ──────────────────────────────────────────────────────
+        let newPosition = player.update(deltaTime: dt)
+
+        // ── Apply to scene ────────────────────────────────────────────────────
+        #if os(macOS) || (os(iOS) && targetEnvironment(simulator))
+        cameraEntity?.position = newPosition
+
+        #elseif os(iOS) && !targetEnvironment(simulator)
+        // On visionOS hardware: move the world opposite to player displacement
+        // to simulate walking while the headset tracks head position.
+        let displacement = newPosition - SIMD3<Float>(0, player.eyeHeight, 0)
+        worldRoot?.position = SIMD3<Float>(-displacement.x, 0, -displacement.z)
+        #endif
+    }
+
+    // MARK: - Spin (preserved from original)
+
     func spinEntity(_ entity: Entity) throws {
-        // Get the entity's spin component.
-        guard let spinComponent = entity.components[SpinComponent.self]
-        else { return }
-
-        // Create a spin action that makes one revolution
-        // around the axis from the component.
+        guard let spinComponent = entity.components[SpinComponent.self] else { return }
         let spinAction = SpinAction(revolutions: 1, localAxis: spinComponent.spinAxis)
-
-        // Create a one second animation that spins an entity.
         let spinAnimation = try AnimationResource.makeActionAnimation(
             for: spinAction,
             duration: 1,
             bindTarget: .transform
         )
-
-        // Play the animation that spins the entity.
         entity.playAnimation(spinAnimation)
     }
 }
