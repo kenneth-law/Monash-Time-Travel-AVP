@@ -59,7 +59,7 @@ enum MenuScene: String, CaseIterable, Codable {
     var scale: Float {
         switch self {
         case .hongKong:
-            return 0.08
+            return 0.12
         }
     }
 
