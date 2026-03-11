@@ -27,6 +27,7 @@ struct ImmersiveGameView: View {
         let scene = SceneRefs()
         var isSceneReady = false
         var environmentResource: EnvironmentResource?
+        var visibleSkyTexture: TextureResource?
         var updateSubscription: EventSubscription?
         var sceneLoadTask: Task<Void, Never>?
     }
@@ -123,7 +124,7 @@ struct ImmersiveGameView: View {
             do {
                 let environment = try runtime.envManager.loadEnvironmentResource(name: "clarens_midday_4k")
                 runtime.environmentResource = environment
-                applySkyDome(using: environment)
+                applySkyDome(using: try loadVisibleSkyTexture())
                 applyImageBasedLighting(using: environment)
 
                 try await runtime.envManager.loadFromBundle(
@@ -140,11 +141,27 @@ struct ImmersiveGameView: View {
         }
     }
 
-    private func applySkyDome(using environment: EnvironmentResource) {
+    private func loadVisibleSkyTexture() throws -> TextureResource {
+        if let cached = runtime.visibleSkyTexture {
+            return cached
+        }
+
+        do {
+            let texture = try TextureResource.load(named: "clarens_midday_4k_visible", in: .main)
+            runtime.visibleSkyTexture = texture
+            return texture
+        } catch {
+            let texture = try TextureResource.load(named: "clarens_midday_4k_visible.jpg", in: .main)
+            runtime.visibleSkyTexture = texture
+            return texture
+        }
+    }
+
+    private func applySkyDome(using texture: TextureResource) {
         guard let skyDome = runtime.scene.skyDome else { return }
 
         var material = UnlitMaterial()
-        material.color = .init(tint: .white, texture: .init(environment.skybox))
+        material.color = .init(texture: .init(texture))
 
         skyDome.components.set(ModelComponent(
             mesh: .generateSphere(radius: 300),
