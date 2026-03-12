@@ -49,7 +49,7 @@ struct ImmersiveGameView: View {
         }
         .onAppear {
             runtime.player.clearInput()
-            runtime.player.position = [0, runtime.player.eyeHeight, 0]
+            runtime.player.resetToGround()
         }
         .onDisappear {
             runtime.player.clearInput()
@@ -59,8 +59,11 @@ struct ImmersiveGameView: View {
             runtime.sceneLoadTask = nil
             runtime.isSceneReady = false
         }
-        .onChange(of: selection) { _, _ in
+        .onChange(of: selection) { oldValue, newValue in
             guard runtime.isSceneReady else { return }
+            if oldValue.scene == newValue.scene, newValue.scene.featuredAsset != nil {
+                return
+            }
             rebuildDestination()
         }
         .onKeyPress(phases: .down) { press in
@@ -128,7 +131,7 @@ struct ImmersiveGameView: View {
         runtime.sceneLoadTask?.cancel()
         runtime.sceneLoadTask = Task { @MainActor in
             runtime.player.clearInput()
-            runtime.player.position = [0, runtime.player.eyeHeight, 0]
+            runtime.player.resetToGround()
             runtime.scene.worldRoot?.position = .zero
             runtime.envManager.clearAll()
 
@@ -143,20 +146,59 @@ struct ImmersiveGameView: View {
                 print("[ImmersiveGameView] Failed to load immersive environment: \(error)")
             }
 
-            rebuildDestination()
+            rebuildDestination(cancelExistingTask: false)
         }
     }
 
-    private func rebuildDestination() {
+    private func rebuildDestination(cancelExistingTask: Bool = true) {
         guard let destinationRoot = runtime.scene.destinationRoot else { return }
+        let activeSelection = selection
 
-        for child in Array(destinationRoot.children) {
-            child.removeFromParent()
+        if cancelExistingTask {
+            runtime.sceneLoadTask?.cancel()
+        }
+        runtime.sceneLoadTask = Task { @MainActor in
+            for child in Array(destinationRoot.children) {
+                child.removeFromParent()
+            }
+
+            runtime.player.clearInput()
+            runtime.player.resetToGround()
+
+            if let featuredAsset = activeSelection.scene.featuredAsset {
+                do {
+                    let entity = try await loadSceneAsset(featuredAsset)
+                    guard !Task.isCancelled else { return }
+                    destinationRoot.position = .zero
+                    destinationRoot.addChild(entity)
+                    return
+                } catch is CancellationError {
+                    return
+                } catch {
+                    print("[ImmersiveGameView] Failed to load featured asset for '\(activeSelection.scene.title)': \(error)")
+                }
+            }
+
+            let placeholder = PlaceholderSceneBuilder.makeScene(for: activeSelection, interactive: true)
+            destinationRoot.position = activeSelection.scene.immersivePosition
+            destinationRoot.addChild(placeholder)
+        }
+    }
+
+    private func loadSceneAsset(_ configuration: SceneAssetConfiguration) async throws -> Entity {
+        guard let assetURL = Bundle.main.url(
+            forResource: configuration.fileStem,
+            withExtension: configuration.fileExtension
+        ) else {
+            throw CocoaError(.fileNoSuchFile)
         }
 
-        let placeholder = PlaceholderSceneBuilder.makeScene(for: selection, interactive: true)
-        destinationRoot.position = selection.scene.immersivePosition
-        destinationRoot.addChild(placeholder)
+        let entity = try await Entity(contentsOf: assetURL)
+        entity.scale = SIMD3<Float>(repeating: configuration.scale)
+
+        let bounds = entity.visualBounds(relativeTo: nil)
+        entity.position = configuration.immersivePosition + SIMD3<Float>(-bounds.center.x, -bounds.min.y, -bounds.center.z)
+        return entity
     }
 
     private func loadVisibleSkyTexture() throws -> TextureResource {

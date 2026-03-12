@@ -72,6 +72,12 @@ final class PlayerController {
         isSprinting = enabled
     }
 
+    func resetToGround(at horizontalPosition: SIMD2<Float> = .zero) {
+        position = [horizontalPosition.x, eyeHeight, horizontalPosition.y]
+        velocity = .zero
+        isAirborne = false
+    }
+
     // MARK: - Mouse look
 
     /// Updates yaw and pitch from raw mouse delta values (pixels).

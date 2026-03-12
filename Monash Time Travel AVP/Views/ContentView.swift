@@ -102,7 +102,10 @@ struct ContentView: View {
             #endif
         }
         #if !os(visionOS)
-        .onChange(of: selection) { _, _ in
+        .onChange(of: selection) { oldValue, newValue in
+            if oldValue.scene == newValue.scene, newValue.scene.featuredAsset != nil {
+                return
+            }
             rebuildWindowScene()
         }
         #endif
@@ -341,13 +344,56 @@ struct ContentView: View {
     private func rebuildWindowScene() {
         guard let destinationRoot = runtime.scene.destinationRoot else { return }
 
-        for child in Array(destinationRoot.children) {
-            child.removeFromParent()
+        let activeSelection = selection
+
+        runtime.sceneLoadTask?.cancel()
+        runtime.sceneLoadTask = Task { @MainActor in
+            for child in Array(destinationRoot.children) {
+                child.removeFromParent()
+            }
+
+            runtime.player.clearInput()
+            runtime.player.resetToGround()
+
+            if let featuredAsset = activeSelection.scene.featuredAsset {
+                do {
+                    let entity = try await loadSceneAsset(featuredAsset, immersive: false)
+                    guard !Task.isCancelled else { return }
+                    destinationRoot.position = .zero
+                    destinationRoot.addChild(entity)
+                    return
+                } catch is CancellationError {
+                    return
+                } catch {
+                    print("[ContentView] Failed to load featured asset for '\(activeSelection.scene.title)': \(error)")
+                }
+            }
+
+            let placeholder = PlaceholderSceneBuilder.makeScene(for: activeSelection, interactive: true)
+            destinationRoot.position = activeSelection.scene.position
+            destinationRoot.addChild(placeholder)
+        }
+    }
+
+    private func loadSceneAsset(
+        _ configuration: SceneAssetConfiguration,
+        immersive: Bool
+    ) async throws -> Entity {
+        guard let assetURL = Bundle.main.url(
+            forResource: configuration.fileStem,
+            withExtension: configuration.fileExtension
+        ) else {
+            throw CocoaError(.fileNoSuchFile)
         }
 
-        let placeholder = PlaceholderSceneBuilder.makeScene(for: selection, interactive: true)
-        destinationRoot.position = selection.scene.position
-        destinationRoot.addChild(placeholder)
+        let entity = try await Entity(contentsOf: assetURL)
+        let anchor = immersive ? configuration.immersivePosition : configuration.windowPosition
+        let scale = configuration.scale
+
+        entity.scale = SIMD3<Float>(repeating: scale)
+        let bounds = entity.visualBounds(relativeTo: nil)
+        entity.position = anchor + SIMD3<Float>(-bounds.center.x, -bounds.min.y, -bounds.center.z)
+        return entity
     }
 
     #if os(macOS) || (os(iOS) && targetEnvironment(simulator))
@@ -454,6 +500,7 @@ struct ContentView: View {
         #else
         rebuildWindowScene()
         lastDragLocation = nil
+        runtime.player.resetToGround()
         runtime.player.clearInput()
         gameState = .playing
         #endif
