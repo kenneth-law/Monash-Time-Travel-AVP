@@ -1,5 +1,13 @@
 # Monash Time Travel AVP
 
+<img width="720" height="720" alt="image" src="https://github.com/user-attachments/assets/15f5802e-8c2a-4b61-8ff5-0864accdea83" />
+
+<img width="2732" height="2048" alt="image" src="https://github.com/user-attachments/assets/33b9c85b-6450-45d1-b6e1-dfd356697956" />
+
+(Test Scene)
+<img width="2732" height="2048" alt="image" src="https://github.com/user-attachments/assets/057e86b7-56ee-4e3a-8a13-0f47fffa7241" />
+
+
 Monash Time Travel AVP is an Apple Vision Pro and desktop prototype exploring how immersive spatial computing can present Monash University Clayton across deep time, travelling from 2026 back to 10000 BC.
 
 The project began on 10 March 2026 and is being built under [Monash Nexus of Emerging Technology](https://monashemerging.tech/), an IT team at Monash University Clayton. It is being developed in collaboration with the MVIS Lab at Monash, using Apple Vision Pro equipment and technical guidance. The portfolio lead for the project is Kenneth Law.
