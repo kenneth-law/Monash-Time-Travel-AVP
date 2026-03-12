@@ -209,6 +209,37 @@ struct ScenePalette {
     let ground: SIMD3<Float>
 }
 
+struct SceneAssetConfiguration {
+    let fileName: String
+    let scale: Float
+    let windowPosition: SIMD3<Float>
+    let immersivePosition: SIMD3<Float>
+
+    var fileStem: String {
+        URL(fileURLWithPath: fileName).deletingPathExtension().lastPathComponent
+    }
+
+    var fileExtension: String {
+        URL(fileURLWithPath: fileName).pathExtension
+    }
+}
+
+extension MenuScene {
+    var featuredAsset: SceneAssetConfiguration? {
+        switch self {
+        case .alanFinkelBuilding:
+            return SceneAssetConfiguration(
+                fileName: "Full_Gameready_City_Buildings_IV_HongKong.usdz",
+                scale: 0.1,
+                windowPosition: [0, 0, -8],
+                immersivePosition: [0, -1.75, -5]
+            )
+        case .campusCentre, .ltb, .lemonScentedLawn:
+            return nil
+        }
+    }
+}
+
 enum PlaceholderSceneBuilder {
     static func makeScene(for selection: TimeTravelSelection, interactive: Bool) -> Entity {
         let root = Entity()
